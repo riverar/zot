@@ -99,9 +99,126 @@ jobs:
           overwrite: true
           file_glob: true
 
+  build-windows:
+    name: Build ZOT for Windows
+    permissions:
+      contents: write
+      packages: write
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64]
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+      
+      - name: Install go
+        uses: actions/setup-go@v5
+        with:
+          cache: false
+          go-version: 1.23.x
+      
+      - name: Cache go dependencies
+        id: cache-go-dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\go\pkg\mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      
+      - name: Cache go build output
+        id: cache-go-build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\go-build
+          key: windows-${{ matrix.arch }}-go-build-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            windows-${{ matrix.arch }}-go-build-
+      
+      - name: Install go dependencies
+        if: steps.cache-go-dependencies.outputs.cache-hit != 'true'
+        run: go mod download
+      
+      - name: Create bin directory
+        run: |
+          if (-not (Test-Path "bin")) {
+            New-Item -ItemType Directory -Path "bin"
+          }
+      
+      - name: Build minimal version
+        run: |
+          $env:COMMIT_HASH = git describe --always --tags --long
+          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
+          
+          $env:CGO_ENABLED = 0
+          $env:GOOS = "windows"
+          $env:GOARCH = "${{ matrix.arch }}"
+          
+          $Tags = "containers_image_openpgp,windows"
+          $LdFlags = "-X zotregistry.dev/zot/pkg/api/config.ReleaseTag=$env:RELEASE_TAG " +
+                     "-X zotregistry.dev/zot/pkg/api/config.Commit=$env:COMMIT_HASH " +
+                     "-X zotregistry.dev/zot/pkg/api/config.BinaryType=minimal " +
+                     "-X zotregistry.dev/zot/pkg/api/config.GoVersion=$env:GO_VERSION " +
+                     "-s -w"
+          
+          go build -o "bin\zot-windows-${{ matrix.arch }}-minimal.exe" -tags $Tags -v -trimpath -ldflags $LdFlags ./cmd/zot
+      
+      - name: Build full version
+        run: |
+          $env:COMMIT_HASH = git describe --always --tags --long
+          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
+          
+          $env:CGO_ENABLED = 0
+          $env:GOOS = "windows"
+          $env:GOARCH = "${{ matrix.arch }}"
+          
+          $Extensions = "sync,search,scrub,metrics,lint,ui,mgmt,profile,userprefs,imagetrust"
+          $Tags = "$Extensions,containers_image_openpgp,windows"
+          $BinaryType = "-$($Extensions -replace ',','-')"
+          $LdFlags = "-X zotregistry.dev/zot/pkg/api/config.ReleaseTag=$env:RELEASE_TAG " +
+                     "-X zotregistry.dev/zot/pkg/api/config.Commit=$env:COMMIT_HASH " +
+                     "-X zotregistry.dev/zot/pkg/api/config.BinaryType=$BinaryType " +
+                     "-X zotregistry.dev/zot/pkg/api/config.GoVersion=$env:GO_VERSION " +
+                     "-s -w"
+          
+          go build -o "bin\zot-windows-${{ matrix.arch }}.exe" -tags $Tags -v -trimpath -ldflags $LdFlags ./cmd/zot
+      
+      - name: Build CLI
+        run: |
+          $env:COMMIT_HASH = git describe --always --tags --long
+          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
+          
+          $env:CGO_ENABLED = 0
+          $env:GOOS = "windows"
+          $env:GOARCH = "${{ matrix.arch }}"
+          
+          $Tags = "search,containers_image_openpgp,windows"
+          $LdFlags = "-X zotregistry.dev/zot/pkg/api/config.Commit=$env:COMMIT_HASH " +
+                     "-X zotregistry.dev/zot/pkg/api/config.BinaryType=cli " +
+                     "-X zotregistry.dev/zot/pkg/api/config.GoVersion=$env:GO_VERSION " +
+                     "-s -w"
+          
+          go build -o "bin\zli-windows-${{ matrix.arch }}.exe" -tags $Tags -v -trimpath -ldflags $LdFlags ./cmd/zli
+      
+      - if: github.event_name == 'release' && github.event.action == 'published'
+        name: Publish Windows artifacts on releases
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: bin\z*
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+
   release-checksums:
     name: Release Artifact Checksums
-    needs: build-arch
+    needs: [build-arch, build-windows]
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
     permissions:
