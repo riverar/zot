@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Check out source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history and tags for git describe commands
       
       - name: Install go
         uses: actions/setup-go@v5
@@ -35,7 +37,7 @@ jobs:
         with:
           path: |
             ~\go\pkg\mod
-          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-mod-
       
@@ -45,13 +47,62 @@ jobs:
         with:
           path: |
             ~\AppData\Local\go-build
-          key: windows-${{ matrix.arch }}-go-build-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-build-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            windows-${{ matrix.arch }}-go-build-
+            ${{ runner.os }}-go-build-
       
       - name: Install go dependencies
         if: steps.cache-go-dependencies.outputs.cache-hit != 'true'
         run: go mod download
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      # Use a simple file-based cache for ZUI build without dependencies on non-existent files
+      - name: Cache ZUI build
+        uses: actions/cache@v4
+        id: cache-zui-build
+        with:
+          path: pkg\extensions\build
+          key: ${{ runner.os }}-zui-build-v1
+          restore-keys: |
+            ${{ runner.os }}-zui-build-
+      
+      - name: Fetch and build ZUI
+        if: steps.cache-zui-build.outputs.cache-hit != 'true'
+        run: |
+          # Create directories
+          $ZUI_DIR = "zui"
+          $EXT_DIR = "pkg\extensions\build"
+          
+          # Clone ZUI repository
+          git clone https://github.com/project-zot/zui.git $ZUI_DIR
+          
+          # Build ZUI
+          cd $ZUI_DIR
+          npm install
+          npm run build
+          cd ..
+          
+          # Create extensions directory if it doesn't exist
+          if (-not (Test-Path $EXT_DIR -PathType Container)) {
+            New-Item -ItemType Directory -Path $EXT_DIR -Force
+          }
+          
+          # Copy the ZUI build output to extensions directory
+          Copy-Item -Path "$ZUI_DIR\build\*" -Destination $EXT_DIR -Recurse -Force
+          
+          # Log the copied files
+          Write-Host "ZUI build files copied to pkg\extensions\build:"
+          Get-ChildItem -Path $EXT_DIR -Recurse | Select-Object -First 10
+      
+      - name: Display ZUI build contents
+        if: steps.cache-zui-build.outputs.cache-hit == 'true'
+        run: |
+          Write-Host "Using cached ZUI build"
+          Get-ChildItem -Path "pkg\extensions\build" -Recurse | Select-Object -First 5
       
       - name: Create bin directory
         run: |
@@ -61,8 +112,18 @@ jobs:
       
       - name: Build minimal version
         run: |
-          $env:COMMIT_HASH = git describe --always --tags --long
-          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          # Fallback values in case git describe fails
+          $env:COMMIT_HASH = $(git rev-parse --short HEAD)
+          $env:RELEASE_TAG = "dev"
+          
+          # Try to get more descriptive values if tags exist
+          try {
+            $env:COMMIT_HASH = $(git describe --always --tags --long)
+            $env:RELEASE_TAG = $(git describe --tags --abbrev=0)
+          } catch {
+            Write-Host "Warning: Unable to get git tag information, using fallback values"
+          }
+          
           $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
           
           $env:CGO_ENABLED = 0
@@ -80,8 +141,18 @@ jobs:
       
       - name: Build full version
         run: |
-          $env:COMMIT_HASH = git describe --always --tags --long
-          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          # Fallback values in case git describe fails
+          $env:COMMIT_HASH = $(git rev-parse --short HEAD)
+          $env:RELEASE_TAG = "dev"
+          
+          # Try to get more descriptive values if tags exist
+          try {
+            $env:COMMIT_HASH = $(git describe --always --tags --long)
+            $env:RELEASE_TAG = $(git describe --tags --abbrev=0)
+          } catch {
+            Write-Host "Warning: Unable to get git tag information, using fallback values"
+          }
+          
           $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
           
           $env:CGO_ENABLED = 0
@@ -101,8 +172,18 @@ jobs:
       
       - name: Build CLI
         run: |
-          $env:COMMIT_HASH = git describe --always --tags --long
-          $env:RELEASE_TAG = git describe --tags --abbrev=0
+          # Fallback values in case git describe fails
+          $env:COMMIT_HASH = $(git rev-parse --short HEAD)
+          $env:RELEASE_TAG = "dev"
+          
+          # Try to get more descriptive values if tags exist
+          try {
+            $env:COMMIT_HASH = $(git describe --always --tags --long)
+            $env:RELEASE_TAG = $(git describe --tags --abbrev=0)
+          } catch {
+            Write-Host "Warning: Unable to get git tag information, using fallback values"
+          }
+          
           $env:GO_VERSION = (go version) -replace "go version (go\S+) .+", '$1'
           
           $env:CGO_ENABLED = 0
@@ -117,42 +198,9 @@ jobs:
           
           go build -o "bin\zli-windows-${{ matrix.arch }}.exe" -tags $Tags -v -trimpath -ldflags $LdFlags ./cmd/zli
       
-      - if: github.event_name == 'release' && github.event.action == 'published'
-        name: Publish Windows artifacts on releases
-        uses: svenstaro/upload-release-action@v2
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: bin\z*
-          tag: ${{ github.ref }}
-          overwrite: true
-          file_glob: true
-
-  release-checksums:
-    name: Release Artifact Checksums
-    needs: [build-windows]
-    if: github.event_name == 'release' && github.event.action == 'published'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - name: Download Release Artifacts
-        uses: robinraju/release-downloader@v1.12
-        with:
-          tag: ${{ github.ref_name }}
-          fileName: "z*"
-      - name: Generate checksum
-        uses: jmgilman/actions-generate-checksum@v1
-        with:
-          patterns: z*
-          method: sha256
-          output: checksums.sha256.txt
-      - name: Add wildcard character prefix to filenames in checksum file
-        run: sed -i 's! ! \*!g' checksums.sha256.txt
-      - name: Publish checksums on releases
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: checksums.sha256.txt
-          tag: ${{ github.ref }}
-          overwrite: true
+          name: windows-binaries
+          path: bin\z*.exe
+          if-no-files-found: error
